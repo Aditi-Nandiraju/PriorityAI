@@ -1,0 +1,19 @@
+# --- ML / data pipeline ---
+scikit-learn
+scipy
+pandas
+numpy
+joblib
+matplotlib
+
+# --- API backend ---
+fastapi
+uvicorn[standard]
+python-multipart
+python-dotenv
+pymongo
+dnspython
+passlib[bcrypt]
+bcrypt<4.1
+pyjwt
+pulp

@@ -1,0 +1,21 @@
+# --- secrets ---
+.env
+.env.*
+!.env.example
+
+# --- python ---
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# --- node / frontend ---
+node_modules/
+
+# --- trained models / regenerable artifacts ---
+models/*.joblib
+outputs/
+
+# --- misc ---
+.pytest_cache/
+.DS_Store
