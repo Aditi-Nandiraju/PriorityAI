@@ -1,19 +1,24 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api.js";
+import { useAuth } from "../context/AuthContext.jsx";
 
 export default function IncidentDetail() {
   const { id } = useParams();
   const [inc, setInc] = useState(null);
   const [error, setError] = useState("");
 
-  useEffect(() => {
+  const loadIncident = useCallback(() => {
     setError("");
     api
       .get(`/incidents/${id}`, { auth: false })
       .then(setInc)
       .catch((e) => setError(e.message));
   }, [id]);
+
+  useEffect(() => {
+    loadIncident();
+  }, [loadIncident]);
 
   if (error) return <div className="alert error">{error}</div>;
   if (!inc) return <p className="muted">loading…</p>;
@@ -44,7 +49,7 @@ export default function IncidentDetail() {
         <Field label="Created at" value={fmt(inc.created_at)} />
       </div>
 
-      <ResourcesCard incidentId={id} required={inc.required_resources} status={inc.status} />
+      <AllocationCard incident={inc} onChange={loadIncident} />
 
       <div className="card">
         <h3>Severity breakdown</h3>
@@ -87,36 +92,77 @@ export default function IncidentDetail() {
   );
 }
 
-// Shows the incident type's fixed resource requirement, and — via the read-only
-// /incidents/{id}/allocation preview — whether the current queue + inventory can
-// actually cover it (optimal or greedy). No writes, no audit entry.
-function ResourcesCard({ incidentId, required, status }) {
+// Requirement · AI suggestion · who else is competing for the same resources ·
+// the operator's own committed assignment (which they can override). Resolving
+// the incident releases its resources back to the pool.
+function AllocationCard({ incident, onChange }) {
+  const { isAuthenticated } = useAuth();
+  const id = incident.id;
   const [method, setMethod] = useState("optimal");
-  const [alloc, setAlloc] = useState(null);
+  const [con, setCon] = useState(null);
+  const [draft, setDraft] = useState({}); // {resource_type: qty} the operator is editing
   const [err, setErr] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [openType, setOpenType] = useState(null);
 
   const load = useCallback(() => {
-    setLoading(true);
     setErr("");
     api
-      .get(`/incidents/${incidentId}/allocation?method=${method}`, { auth: false })
-      .then(setAlloc)
-      .catch((e) => setErr(e.message))
-      .finally(() => setLoading(false));
-  }, [incidentId, method]);
+      .get(`/incidents/${id}/contention?method=${method}`, { auth: false })
+      .then((c) => {
+        setCon(c);
+        // pre-fill the editor: current assignment if any, else the AI suggestion
+        const hasAssigned = Object.keys(c.assigned || {}).length > 0;
+        const base = hasAssigned ? c.assigned : c.suggested;
+        setDraft(Object.fromEntries(Object.keys(c.required).map((k) => [k, base[k] ?? 0])));
+      })
+      .catch((e) => setErr(e.message));
+  }, [id, method]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  const reqEntries = Object.entries(required || {});
-  const row = alloc?.allocation;
+  async function commit(assigned) {
+    setBusy(true);
+    setErr("");
+    try {
+      await api.put(`/incidents/${id}/assignment`, { assigned });
+      onChange();
+      load();
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function setStatus(status) {
+    setBusy(true);
+    setErr("");
+    try {
+      await api.post(`/incidents/${id}/status`, { status });
+      onChange();
+      load();
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!con) return <div className="card muted">loading allocation…</div>;
+
+  const reqTypes = Object.keys(con.required);
+  const resolved = incident.status !== "active";
+  const cap = (t) =>
+    (con.availability[t]?.assigned_to_this_incident ?? 0) +
+    (con.availability[t]?.available_now ?? 0);
 
   return (
     <div className="card">
       <div className="sim-head">
-        <h3>Resources</h3>
+        <h3>Allocation &amp; assignment</h3>
         <div className="controls">
           <label className="inline">
             Method
@@ -125,58 +171,159 @@ function ResourcesCard({ incidentId, required, status }) {
               <option value="greedy">greedy</option>
             </select>
           </label>
-          <button className="btn ghost" onClick={load} disabled={loading}>
-            {loading ? "…" : "Re-check"}
-          </button>
+          {isAuthenticated && !resolved && (
+            <button className="btn ghost" onClick={() => setStatus("resolved")} disabled={busy}>
+              Resolve (release)
+            </button>
+          )}
+          {isAuthenticated && resolved && (
+            <button className="btn ghost" onClick={() => setStatus("active")} disabled={busy}>
+              Reopen
+            </button>
+          )}
         </div>
       </div>
 
-      <p className="muted small">
-        Requirement:{" "}
-        {reqEntries.length === 0
-          ? "none"
-          : reqEntries.map(([k, v]) => `${v}× ${k.replace(/_/g, " ")}`).join(", ")}
-      </p>
-
       {err && <div className="alert error">{err}</div>}
 
-      {status !== "active" ? (
-        <p className="muted">Incident is {status} — not part of the live simulation.</p>
-      ) : !row ? (
-        <p className="muted">{loading ? "checking allocation…" : "no allocation result"}</p>
+      {reqTypes.length === 0 ? (
+        <p className="muted">This incident type needs no resources.</p>
+      ) : resolved ? (
+        <p className="muted">
+          Incident is {incident.status} — resources released. Reopen to assign again.
+        </p>
       ) : (
         <>
-          <p>
-            <span className={`chip alloc-chip ${row.status}`}>
-              {row.status.replace(/_/g, " ").toLowerCase()}
-            </span>{" "}
-            <span className="muted small">
-              at priority {row.priority_score} · {method} plan:{" "}
-              {alloc.plan_summary.fully_resourced} fully / {alloc.plan_summary.response_gaps} gaps
+          <p className="muted small">
+            AI suggestion ({method}):{" "}
+            {Object.entries(con.suggested).length
+              ? Object.entries(con.suggested)
+                  .map(([k, v]) => `${v}× ${k.replace(/_/g, " ")}`)
+                  .join(", ")
+              : "nothing available for it"}
+            {" · "}
+            plan: {con.plan_summary.fully_resourced} fully / {con.plan_summary.response_gaps} gaps ·
+            this incident would be{" "}
+            <span className={`chip alloc-chip ${con.sim_status}`}>
+              {(con.sim_status || "").replace(/_/g, " ").toLowerCase()}
             </span>
           </p>
-          <table className="data-table">
+
+          <table className="data-table assign-table">
             <thead>
               <tr>
                 <th>Resource</th>
-                <th>Needed</th>
-                <th>Allocated</th>
-                <th>Short</th>
+                <th>Needs</th>
+                <th>Suggested</th>
+                <th>Assign</th>
+                <th>Available</th>
+                <th>Also needed by</th>
               </tr>
             </thead>
             <tbody>
-              {reqEntries.map(([k, need]) => (
-                <tr key={k}>
-                  <td>{k.replace(/_/g, " ")}</td>
-                  <td>{need}</td>
-                  <td>{row.allocated?.[k] ?? 0}</td>
-                  <td className={row.shortages?.[k] ? "short" : "muted"}>
-                    {row.shortages?.[k] ?? "—"}
-                  </td>
-                </tr>
-              ))}
+              {reqTypes.map((t) => {
+                const rivals = con.competitors[t] || [];
+                return (
+                  <tr key={t}>
+                    <td>{t.replace(/_/g, " ")}</td>
+                    <td>{con.required[t]}</td>
+                    <td className="muted">{con.suggested[t] ?? 0}</td>
+                    <td>
+                      <input
+                        type="number"
+                        min="0"
+                        max={cap(t)}
+                        className="qty"
+                        value={draft[t] ?? 0}
+                        disabled={!isAuthenticated}
+                        onChange={(e) =>
+                          setDraft({ ...draft, [t]: Math.max(0, Number(e.target.value)) })
+                        }
+                      />
+                    </td>
+                    <td className="muted">
+                      {con.availability[t]?.available_now} of {con.availability[t]?.total}
+                    </td>
+                    <td>
+                      <button
+                        className="btn ghost xs"
+                        onClick={() => setOpenType(openType === t ? null : t)}
+                      >
+                        {rivals.length} incident{rivals.length === 1 ? "" : "s"}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
+
+          {openType && (
+            <div className="competitors">
+              <strong>Also need {openType.replace(/_/g, " ")}:</strong>
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Incident</th>
+                    <th>Priority</th>
+                    <th>Needs</th>
+                    <th>Assigned</th>
+                    <th>Sim status</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {(con.competitors[openType] || []).map((c) => (
+                    <tr key={c.id}>
+                      <td>{c.incident_type.replace(/_/g, " ")}</td>
+                      <td>{c.priority_score}</td>
+                      <td>{c.requires}</td>
+                      <td>{c.assigned || "—"}</td>
+                      <td>
+                        <span className={`chip alloc-chip ${c.sim_status}`}>
+                          {(c.sim_status || "").replace(/_/g, " ").toLowerCase()}
+                        </span>
+                      </td>
+                      <td>
+                        <Link to={`/incident/${c.id}`}>open</Link>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {isAuthenticated ? (
+            <div className="assign-actions">
+              <button
+                className="btn ghost"
+                onClick={() =>
+                  setDraft(
+                    Object.fromEntries(reqTypes.map((t) => [t, con.suggested[t] ?? 0]))
+                  )
+                }
+              >
+                Use suggestion
+              </button>
+              <button className="btn primary" onClick={() => commit(draft)} disabled={busy}>
+                {busy ? "Saving…" : "Commit assignment"}
+              </button>
+              <button className="btn ghost" onClick={() => commit({})} disabled={busy}>
+                Clear
+              </button>
+              {Object.keys(con.assigned).length > 0 && (
+                <span className="muted small">
+                  committed:{" "}
+                  {Object.entries(con.assigned)
+                    .map(([k, v]) => `${v}× ${k.replace(/_/g, " ")}`)
+                    .join(", ")}
+                </span>
+              )}
+            </div>
+          ) : (
+            <p className="muted small">Sign in to assign resources.</p>
+          )}
         </>
       )}
     </div>

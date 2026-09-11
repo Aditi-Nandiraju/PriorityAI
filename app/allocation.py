@@ -50,6 +50,18 @@ def compute_priority(severity_class: str, confidence_score: float) -> float:
     return round(0.7 * SEVERITY_WEIGHT[severity_class] + 0.3 * float(confidence_score), 1)
 
 
+def _req(inc: dict) -> dict[str, int]:
+    """
+    What this incident still needs from the allocator. When the caller has
+    already committed some resources to it (operator assignment), it passes
+    `required_remaining` = requirement minus what's assigned; otherwise fall
+    back to the full type requirement.
+    """
+    if "required_remaining" in inc:
+        return {k: v for k, v in inc["required_remaining"].items() if v > 0}
+    return RESOURCE_REQUIREMENTS.get(inc["incident_type"], {})
+
+
 # --------------------------------------------------------------------------- #
 def _entry(inc: dict, req: dict, allocated: dict, shortages: dict) -> dict:
     if not shortages:
@@ -58,7 +70,7 @@ def _entry(inc: dict, req: dict, allocated: dict, shortages: dict) -> dict:
         status = "PARTIALLY_RESOURCED"
     else:
         status = "UNRESOURCED"
-    return {
+    entry = {
         "incident_id": inc["id"],
         "incident_type": inc["incident_type"],
         "severity_class": inc.get("severity_class"),
@@ -68,6 +80,9 @@ def _entry(inc: dict, req: dict, allocated: dict, shortages: dict) -> dict:
         "shortages": shortages,
         "status": status,
     }
+    if inc.get("assigned"):
+        entry["assigned"] = dict(inc["assigned"])
+    return entry
 
 
 def _plan(method, allocations, starting_inv, remaining_inv, solver=None) -> dict:
@@ -94,7 +109,7 @@ def _greedy_fill(incidents, inv, allocations, skip_ids=frozenset()):
     for inc in sorted(incidents, key=lambda i: i["priority_score"], reverse=True):
         if inc["id"] in skip_ids:
             continue
-        req = RESOURCE_REQUIREMENTS.get(inc["incident_type"], {})
+        req = _req(inc)
         allocated, shortages = {}, {}
         for rtype, need in req.items():
             got = min(inv.get(rtype, 0), need)
@@ -121,12 +136,12 @@ def allocate_optimal(incidents: list[dict], inventory: dict[str, int]) -> dict:
     x = {inc["id"]: pulp.LpVariable(f"x_{k}", cat="Binary") for k, inc in enumerate(incidents)}
     prob += pulp.lpSum(inc["priority_score"] * x[inc["id"]] for inc in incidents)
 
-    req_types = {r for inc in incidents for r in RESOURCE_REQUIREMENTS.get(inc["incident_type"], {})}
+    req_types = {r for inc in incidents for r in _req(inc)}
     for rtype in req_types:
         cap = inventory.get(rtype, 0)
         prob += (
             pulp.lpSum(
-                RESOURCE_REQUIREMENTS.get(inc["incident_type"], {}).get(rtype, 0) * x[inc["id"]]
+                _req(inc).get(rtype, 0) * x[inc["id"]]
                 for inc in incidents
             )
             <= cap
@@ -141,7 +156,7 @@ def allocate_optimal(incidents: list[dict], inventory: dict[str, int]) -> dict:
     for inc in sorted(incidents, key=lambda i: i["priority_score"], reverse=True):
         if inc["id"] not in chosen:
             continue
-        req = RESOURCE_REQUIREMENTS.get(inc["incident_type"], {})
+        req = _req(inc)
         allocated = {}
         for rtype, need in req.items():
             allocated[rtype] = need

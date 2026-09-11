@@ -1,62 +1,70 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api.js";
+import { useAuth } from "../context/AuthContext.jsx";
 import IncidentCard from "../components/IncidentCard.jsx";
 import ResourceStrip from "../components/ResourceStrip.jsx";
 
 const UNDER_RESOURCED = new Set(["PARTIALLY_RESOURCED", "UNRESOURCED"]);
 
 export default function Board() {
+  const { isAuthenticated } = useAuth();
   const [incidents, setIncidents] = useState(null);
   const [error, setError] = useState("");
   const [statusFilter, setStatusFilter] = useState("active");
   const [plan, setPlan] = useState(null);
-  const [planStale, setPlanStale] = useState(false); // true = plan is a preview, not a committed run
+  const [planStale, setPlanStale] = useState(false); // true = preview, false = committed run
   const [method, setMethod] = useState("optimal");
-  const [simBusy, setSimBusy] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [onlyUnder, setOnlyUnder] = useState(false);
 
   const loadIncidents = useCallback(async () => {
-    setError("");
-    try {
-      const q = statusFilter === "all" ? "" : `?status=${statusFilter}`;
-      setIncidents(await api.get(`/incidents${q}`, { auth: false }));
-    } catch (err) {
-      setError(err.message);
-    }
+    const q = statusFilter === "all" ? "" : `?status=${statusFilter}`;
+    setIncidents(await api.get(`/incidents${q}`, { auth: false }));
   }, [statusFilter]);
 
-  // read-only allocation preview — drives the card highlighting without a click
   const loadPreview = useCallback(async () => {
+    setPlan(await api.get(`/simulate/preview?method=${method}`, { auth: false }));
+    setPlanStale(true);
+  }, [method]);
+
+  const refresh = useCallback(async () => {
+    setError("");
     try {
-      setPlan(await api.get(`/simulate/preview?method=${method}`, { auth: false }));
-      setPlanStale(true);
+      await Promise.all([loadIncidents(), loadPreview()]);
     } catch (err) {
       setError(err.message);
     }
-  }, [method]);
+  }, [loadIncidents, loadPreview]);
 
   useEffect(() => {
-    loadIncidents();
-  }, [loadIncidents]);
+    refresh();
+  }, [refresh]);
 
-  useEffect(() => {
-    loadPreview();
-  }, [loadPreview]);
-
-  async function runSimulation() {
-    setSimBusy(true);
+  async function withBusy(fn) {
+    setBusy(true);
     setError("");
     try {
-      setPlan(await api.post(`/simulate?method=${method}`));
-      setPlanStale(false);
+      await fn();
     } catch (err) {
       setError(err.message);
     } finally {
-      setSimBusy(false);
+      setBusy(false);
     }
   }
 
-  // incident id -> allocation status, from whichever plan we have
+  const runAndLog = () =>
+    withBusy(async () => {
+      setPlan(await api.post(`/simulate?method=${method}`));
+      setPlanStale(false);
+    });
+
+  // assigns to ONE incident only (the card the operator clicked)
+  const quickAssign = (id, assigned) =>
+    withBusy(async () => {
+      await api.put(`/incidents/${id}/assignment`, { assigned });
+      await refresh();
+    });
+
   const statusById = useMemo(() => {
     const m = {};
     for (const a of plan?.allocations || []) m[a.incident_id] = a;
@@ -83,7 +91,7 @@ export default function Board() {
             <option value="all">All</option>
             <option value="resolved">Resolved</option>
           </select>
-          <button className="btn ghost" onClick={loadIncidents}>
+          <button className="btn ghost" onClick={refresh} disabled={busy}>
             Refresh
           </button>
         </div>
@@ -102,8 +110,8 @@ export default function Board() {
                 <option value="greedy">greedy</option>
               </select>
             </label>
-            <button className="btn primary" onClick={runSimulation} disabled={simBusy}>
-              {simBusy ? "Solving…" : "Run & log"}
+            <button className="btn ghost" onClick={runAndLog} disabled={busy}>
+              Run &amp; log
             </button>
           </div>
         </div>
@@ -183,6 +191,9 @@ export default function Board() {
               key={inc.id}
               incident={inc}
               allocation={statusById[inc.id]}
+              canAssign={isAuthenticated}
+              busy={busy}
+              onQuickAssign={quickAssign}
             />
           ))}
         </div>

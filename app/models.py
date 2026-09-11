@@ -147,6 +147,32 @@ class ResourceUpdate(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
+# operator assignment
+# --------------------------------------------------------------------------- #
+class AssignmentRequest(BaseModel):
+    """The full set of resources committed to one incident (replace semantics).
+    An empty map unassigns everything."""
+
+    model_config = ConfigDict(extra="forbid")
+    assigned: dict[str, int] = Field(default_factory=dict)
+
+    @field_validator("assigned")
+    @classmethod
+    def _valid(cls, v: dict[str, int]) -> dict[str, int]:
+        unknown = set(v) - set(RESOURCE_TYPES)
+        if unknown:
+            raise ValueError(f"unknown resource_type(s) {sorted(unknown)}; allowed: {list(RESOURCE_TYPES)}")
+        if any(q < 0 for q in v.values()):
+            raise ValueError("assigned quantities must be >= 0")
+        return {k: int(q) for k, q in v.items() if q > 0}
+
+
+class IncidentStatusRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["active", "resolved"]
+
+
+# --------------------------------------------------------------------------- #
 # generic responses
 # --------------------------------------------------------------------------- #
 class CreatedResponse(BaseModel):

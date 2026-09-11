@@ -1,14 +1,37 @@
 import { Link } from "react-router-dom";
 
 // `allocation` (optional) is this incident's row from the latest allocation plan.
-// When it's PARTIALLY_RESOURCED / UNRESOURCED the card is flagged.
-export default function IncidentCard({ incident, allocation }) {
+// When it's PARTIALLY_RESOURCED / UNRESOURCED the card is flagged, and (if the
+// viewer is signed in) it gets inline "assign suggested" / "clear" controls so
+// the operator doesn't have to open every incident.
+export default function IncidentCard({ incident, allocation, canAssign, busy, onQuickAssign }) {
   const sev = incident.severity_class || "LOW";
   const status = allocation?.status;
   const under = status === "PARTIALLY_RESOURCED" || status === "UNRESOURCED";
+
+  const assigned = allocation?.assigned || incident.assigned || {};
+  const suggested = allocation?.allocated || {}; // solver's extra units for this incident
+  const hasSuggestion = Object.values(suggested).some((v) => v > 0);
+  const hasAssigned = Object.values(assigned).some((v) => v > 0);
+
   const shortages = Object.entries(allocation?.shortages || {})
     .map(([k, v]) => `${k.replace(/_/g, " ")} ×${v}`)
     .join(", ");
+
+  function applySuggested(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    // replace-semantics PUT: existing assignment + the solver's suggestion
+    const merged = { ...assigned };
+    for (const [k, v] of Object.entries(suggested)) merged[k] = (merged[k] || 0) + v;
+    onQuickAssign(incident.id, merged);
+  }
+
+  function clearAssigned(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    onQuickAssign(incident.id, {});
+  }
 
   return (
     <Link
@@ -29,14 +52,51 @@ export default function IncidentCard({ incident, allocation }) {
         <span>·</span>
         <span>confidence {incident.confidence_score ?? "—"}</span>
       </div>
+
       {under && (
         <div className={`ic-alloc ic-alloc-${status}`}>
           {status === "UNRESOURCED" ? "⚠ unresourced" : "⚠ under-resourced"}
           {shortages && <span className="muted"> — short {shortages}</span>}
         </div>
       )}
+
+      {hasAssigned && (
+        <div className="ic-assigned">
+          assigned:{" "}
+          {Object.entries(assigned)
+            .map(([k, v]) => `${v}× ${k.replace(/_/g, " ")}`)
+            .join(", ")}
+        </div>
+      )}
+
+      {canAssign && incident.status === "active" && (hasSuggestion || hasAssigned) && (
+        <div className="ic-actions">
+          {hasSuggestion && (
+            <button className="btn primary xs" onClick={applySuggested} disabled={busy}>
+              Assign suggested
+              {" ("}
+              {Object.entries(suggested)
+                .map(([k, v]) => `${v} ${k.replace(/_/g, " ")}`)
+                .join(", ")}
+              {")"}
+            </button>
+          )}
+          {hasAssigned && (
+            <button className="btn ghost xs" onClick={clearAssigned} disabled={busy}>
+              Clear
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="ic-foot muted small">
         <span className={`chip status-${incident.status}`}>{incident.status}</span>
+        {incident.assignment_status === "FULLY_ASSIGNED" && (
+          <span className="chip assigned-chip">resources assigned</span>
+        )}
+        {incident.assignment_status === "PARTIALLY_ASSIGNED" && (
+          <span className="chip part-assigned-chip">part-assigned</span>
+        )}
         <span>{incident.created_by ? `by ${incident.created_by}` : ""}</span>
       </div>
     </Link>
