@@ -6,6 +6,7 @@ import { renderToString } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 
 import { AuthProvider } from "../src/context/AuthContext.jsx";
+import { BoardDataProvider } from "../src/context/BoardDataContext.jsx";
 import Login from "../src/pages/Login.jsx";
 import Ingest from "../src/pages/Ingest.jsx";
 import Board from "../src/pages/Board.jsx";
@@ -35,9 +36,18 @@ function tryRender(name, el, route = "/") {
 let ok = true;
 console.log("SSR render smoke:");
 ok &= tryRender("Login", React.createElement(Login), "/login");
-ok &= tryRender("Layout shell", React.createElement(Layout));
+// Layout and Board read from BoardDataContext (incidents/resources/demo mode
+// now live above the routed pages so they survive navigation - see
+// context/BoardDataContext.jsx), so both need the provider in the tree.
+ok &= tryRender(
+  "Layout shell",
+  React.createElement(BoardDataProvider, null, React.createElement(Layout))
+);
 ok &= tryRender("Ingest", React.createElement(Ingest));
-ok &= tryRender("Board", React.createElement(Board));
+ok &= tryRender(
+  "Board",
+  React.createElement(BoardDataProvider, null, React.createElement(Board))
+);
 ok &= tryRender("IncidentDetail", React.createElement(IncidentDetail), "/incident/abc");
 ok &= tryRender("Resources", React.createElement(Resources));
 ok &= tryRender("ActivityLog", React.createElement(ActivityLog));

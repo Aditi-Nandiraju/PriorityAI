@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import Layout from "./components/Layout.jsx";
 import ProtectedRoute from "./components/ProtectedRoute.jsx";
+import { BoardDataProvider } from "./context/BoardDataContext.jsx";
 import Login from "./pages/Login.jsx";
 import Ingest from "./pages/Ingest.jsx";
 import Board from "./pages/Board.jsx";
@@ -14,7 +15,16 @@ export default function App() {
       <Route path="/login" element={<Login />} />
 
       <Route element={<ProtectedRoute />}>
-        <Route element={<Layout />}>
+        {/* BoardDataProvider wraps the whole authenticated layout (not just
+            Board) so incidents/resources/demo-mode survive navigating between
+            pages instead of resetting every time a page remounts. */}
+        <Route
+          element={
+            <BoardDataProvider>
+              <Layout />
+            </BoardDataProvider>
+          }
+        >
           <Route index element={<Navigate to="/board" replace />} />
           <Route path="/ingest" element={<Ingest />} />
           <Route path="/board" element={<Board />} />

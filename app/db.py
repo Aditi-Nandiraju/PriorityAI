@@ -19,6 +19,7 @@ Collections
     resources   inventory pools {_id, resource_type, label, quantity}
     audit_log   {timestamp, username, action, details}   (append-only)
     simulations stored allocation plans from POST /simulate
+    files       registry of CSVs ingested via /ingest/{source_type} (metadata only)
 """
 from __future__ import annotations
 
@@ -31,7 +32,7 @@ from pymongo import ASCENDING, MongoClient, ReturnDocument
 
 from .config import MONGO_DB, MONGO_TIMEOUT_MS, MONGO_URI
 
-COLLECTION_NAMES = ("users", "reports", "incidents", "resources", "audit_log", "simulations")
+COLLECTION_NAMES = ("users", "reports", "incidents", "resources", "audit_log", "simulations", "files")
 
 
 # --------------------------------------------------------------------------- #
@@ -176,6 +177,12 @@ def audit_log():
     return _coll("audit_log")
 
 
+def files():
+    """Registry of files ingested via /ingest/{source_type} -- metadata only
+    (filename, source, who/when, what came of it), not the raw bytes."""
+    return _coll("files")
+
+
 def simulations():
     return _coll("simulations")
 
@@ -210,6 +217,7 @@ def ensure_indexes() -> None:
     incidents().create_index([("created_at", ASCENDING)])
     resources().create_index([("resource_type", ASCENDING)])
     audit_log().create_index([("timestamp", ASCENDING)])
+    files().create_index([("uploaded_at", ASCENDING)])
 
 
 def write_audit(username: str, action: str, details: dict[str, Any] | None = None) -> None:

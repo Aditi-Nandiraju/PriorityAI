@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
 import SeverityPreview from "../components/SeverityPreview.jsx";
 
@@ -144,6 +144,19 @@ function CsvTab() {
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [files, setFiles] = useState(null);
+  const [filesError, setFilesError] = useState("");
+
+  const loadFiles = useCallback(() => {
+    api
+      .get("/files?limit=50", { auth: false })
+      .then(setFiles)
+      .catch((e) => setFilesError(e.message));
+  }, []);
+
+  useEffect(() => {
+    loadFiles();
+  }, [loadFiles]);
 
   async function submit(e) {
     e.preventDefault();
@@ -155,6 +168,8 @@ function CsvTab() {
       const fd = new FormData();
       fd.append("file", file);
       setResult(await api.upload(`/ingest/${source}`, fd));
+      setFile(null);
+      loadFiles();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -163,39 +178,109 @@ function CsvTab() {
   }
 
   return (
-    <form onSubmit={submit} className="stack">
-      <p className="muted">
-        CSV needs a <code>text</code> column. <code>location</code> and{" "}
-        <code>occurred_at</code> are optional. Columns that don't belong to the chosen
-        source (e.g. a <code>phone</code> column on citizen reports) are dropped and
-        listed back.
-      </p>
-      <div className="row">
-        <label>
-          Source
-          <select value={source} onChange={(e) => setSource(e.target.value)}>
-            {SOURCES.map((s) => (
-              <option key={s.value} value={s.value}>
-                {s.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="grow">
-          File
-          <input
-            type="file"
-            accept=".csv,text/csv"
-            onChange={(e) => setFile(e.target.files?.[0] || null)}
-          />
-        </label>
-      </div>
-      <button className="btn primary" disabled={busy || !file}>
-        {busy ? "Uploading…" : "Upload"}
-      </button>
-      <Result result={result} error={error} />
-    </form>
+    <div className="stack">
+      <form onSubmit={submit} className="stack">
+        <p className="muted">
+          CSV needs a <code>text</code> column. <code>location</code> and{" "}
+          <code>occurred_at</code> are optional. Columns that don't belong to the chosen
+          source (e.g. a <code>phone</code> column on citizen reports) are dropped and
+          listed back.
+        </p>
+        <div className="row">
+          <label>
+            Source
+            <select value={source} onChange={(e) => setSource(e.target.value)}>
+              {SOURCES.map((s) => (
+                <option key={s.value} value={s.value}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="grow">
+            File
+            <input
+              type="file"
+              accept=".csv,text/csv"
+              onChange={(e) => setFile(e.target.files?.[0] || null)}
+            />
+          </label>
+        </div>
+        <button className="btn primary" disabled={busy || !file}>
+          {busy ? "Uploading…" : "Upload"}
+        </button>
+        <Result result={result} error={error} />
+      </form>
+
+      <UploadedFiles files={files} error={filesError} onRefresh={loadFiles} />
+    </div>
   );
+}
+
+// A running record of every CSV that has actually been ingested: what it was
+// called, which source it went in as, who uploaded it, and what came of it
+// (rows turned into reports, columns dropped for not belonging to that source).
+function UploadedFiles({ files, error, onRefresh }) {
+  return (
+    <div className="card">
+      <div className="sim-head">
+        <h3>Uploaded files</h3>
+        <button className="btn ghost" onClick={onRefresh}>
+          Refresh
+        </button>
+      </div>
+      {error && <div className="alert error">{error}</div>}
+      {!files ? (
+        <p className="muted">loading…</p>
+      ) : files.length === 0 ? (
+        <p className="muted">No CSVs uploaded yet.</p>
+      ) : (
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>File</th>
+              <th>Source</th>
+              <th>Size</th>
+              <th>Reports</th>
+              <th>Dropped columns</th>
+              <th>Uploaded by</th>
+              <th>When</th>
+            </tr>
+          </thead>
+          <tbody>
+            {files.map((f) => (
+              <tr key={f.id}>
+                <td>{f.filename}</td>
+                <td>{f.source_type.replace(/_/g, " ")}</td>
+                <td className="muted">{formatBytes(f.size_bytes)}</td>
+                <td>{f.reports_created}</td>
+                <td className="muted">
+                  {f.dropped_columns?.length ? f.dropped_columns.join(", ") : "—"}
+                </td>
+                <td>{f.uploaded_by}</td>
+                <td className="muted nowrap">{fmtDate(f.uploaded_at)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function formatBytes(n) {
+  if (n == null) return "—";
+  if (n < 1024) return `${n} B`;
+  return `${(n / 1024).toFixed(1)} KB`;
+}
+
+function fmtDate(iso) {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleString();
+  } catch {
+    return iso;
+  }
 }
 
 function SingleEntryTab() {

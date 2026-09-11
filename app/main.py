@@ -34,11 +34,18 @@ from severity_rules import (
 )
 
 from .allocation import allocate, compute_priority, default_confidence
-from .auth import authenticate, create_access_token, get_current_user, require_admin
+from .auth import (
+    authenticate,
+    create_access_token,
+    get_current_user,
+    get_optional_user,
+    require_admin,
+)
 from .config import IS_DEV_SECRET
 from .db import (
     audit_log,
     ensure_indexes,
+    files,
     incidents,
     ping,
     reports,
@@ -60,7 +67,8 @@ from .models import (
     TokenResponse,
 )
 from .parsers import parse_ingest_csv, split_paste
-from .seed import run_seed
+from . import replay
+from .seed import run_seed, seed_resources_if_empty
 
 SOURCE_TYPES = ("social_media", "ground_team", "citizen_reports")
 
@@ -79,6 +87,7 @@ async def lifespan(_: FastAPI):
     if IS_DEV_SECRET:
         print("[WARN] JWT_SECRET not set (using dev default); add it to .env before deploying")
     yield
+    replay.stop()  # don't leave a background task running past the server's own life
 
 
 def _no_users() -> bool:
@@ -249,7 +258,11 @@ def login(body: LoginRequest):
 # ingestion (open)
 # --------------------------------------------------------------------------- #
 @app.post("/ingest/{source_type}")
-async def ingest_csv(source_type: str, file: UploadFile = File(...)):
+async def ingest_csv(
+    source_type: str,
+    file: UploadFile = File(...),
+    user: dict | None = Depends(get_optional_user),
+):
     if source_type not in SOURCE_TYPES:
         raise HTTPException(404, f"unknown source_type; expected one of {list(SOURCE_TYPES)}")
     raw = await file.read()
@@ -258,18 +271,44 @@ async def ingest_csv(source_type: str, file: UploadFile = File(...)):
     except ValueError as exc:
         raise HTTPException(422, str(exc))
 
-    ids = [_insert_report(row, source_type, "anonymous") for row in rows]
+    uploader = user["username"] if user else "anonymous"
+    ids = [_insert_report(row, source_type, uploader) for row in rows]
+
+    fid = uuid.uuid4().hex
+    files().insert_one(
+        {
+            "_id": fid,
+            "filename": file.filename,
+            "source_type": source_type,
+            "size_bytes": len(raw),
+            "reports_created": len(ids),
+            "dropped_columns": dropped,
+            "uploaded_by": uploader,
+            "uploaded_at": utcnow(),
+        }
+    )
     write_audit(
-        "anonymous",
+        uploader,
         f"ingest:{source_type}",
-        {"file": file.filename, "reports_created": len(ids), "dropped_columns": dropped},
+        {"file_id": fid, "file": file.filename, "reports_created": len(ids), "dropped_columns": dropped},
     )
     return {
+        "file_id": fid,
         "source_type": source_type,
         "reports_created": len(ids),
         "report_ids": ids,
         "dropped_columns": dropped,
     }
+
+
+@app.get("/files")
+def list_files(
+    source_type: str | None = None,
+    limit: int = Query(200, ge=1, le=1000),
+):
+    query = {"source_type": source_type} if source_type else {}
+    docs = files().find(query).sort("uploaded_at", -1).limit(limit)
+    return [_clean(d) for d in docs]
 
 
 # --------------------------------------------------------------------------- #
@@ -670,6 +709,55 @@ def simulate(
         {"simulation_id": sid, "method": method, **plan["summary"]},
     )
     return {"id": sid, **plan}
+
+
+# --------------------------------------------------------------------------- #
+# live-feed replay (JWT) - demo tool, see app/replay.py
+# --------------------------------------------------------------------------- #
+@app.post("/replay/start")
+async def replay_start(
+    compression: float = Query(replay.DEFAULT_COMPRESSION, gt=0),
+    user: dict = Depends(get_current_user),
+):
+    """Starts (or restarts, if already running) dripping data/replay/*.csv into
+    `reports` at realistic, compressed pacing, looping forever. Calling this
+    again while it's running replaces the loop with the new compression factor.
+
+    Must be `async def`: it calls asyncio.create_task(), which requires a
+    running event loop. FastAPI runs sync `def` routes in a worker thread that
+    has none - only an async route executes directly on the event loop."""
+    return replay.start(compression, user["username"])
+
+
+@app.post("/replay/stop")
+async def replay_stop(user: dict = Depends(get_current_user)):
+    """Stops the loop only - does not touch any data. POST /reset is the
+    separate, destructive 'clear everything' control.
+
+    async def for the same reason as /replay/start: Task.cancel() should only
+    be called from the event-loop thread the Task itself is running on."""
+    was_running = replay.stop(user["username"])
+    return {"stopped": was_running, **replay.status()}
+
+
+@app.get("/replay/status")
+def replay_status():
+    return replay.status()
+
+
+@app.post("/reset")
+async def reset_everything(user: dict = Depends(require_admin)):
+    """Admin-only, destructive: stops the replay loop, wipes incidents/reports/
+    simulations/files/resources, then reseeds the default inventory so the demo
+    can restart from a clean, fully-stocked state. audit_log is deliberately
+    NOT cleared - it's meant to be an immutable trail, including of this reset.
+    async def so replay.stop()'s Task.cancel() runs on the event-loop thread."""
+    replay.stop(user["username"])
+    for coll in (incidents, reports, simulations, files, resources):
+        coll().delete_many({})
+    seeded = seed_resources_if_empty()
+    write_audit(user["username"], "reset", {"resource_pools_reseeded": seeded})
+    return {"reset": True, "resource_pools_reseeded": seeded}
 
 
 # --------------------------------------------------------------------------- #

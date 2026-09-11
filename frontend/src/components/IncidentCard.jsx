@@ -3,11 +3,17 @@ import { Link } from "react-router-dom";
 // `allocation` (optional) is this incident's row from the latest allocation plan.
 // When it's PARTIALLY_RESOURCED / UNRESOURCED the card is flagged, and (if the
 // viewer is signed in) it gets inline "assign suggested" / "clear" controls so
-// the operator doesn't have to open every incident.
+// the operator doesn't have to open every incident. Resolving is NOT a manual
+// board action - see hooks/useDemoMode.js: an incident resolves once it's
+// fully resourced and nothing more is outstanding, same as it would in reality.
 export default function IncidentCard({ incident, allocation, canAssign, busy, onQuickAssign }) {
   const sev = incident.severity_class || "LOW";
   const status = allocation?.status;
-  const under = status === "PARTIALLY_RESOURCED" || status === "UNRESOURCED";
+  // guard on incident.status too: once an incident is resolved (including by
+  // demo mode) its old allocation row can be stale - never highlight it as
+  // under-resourced or offer assign actions once it's no longer active.
+  const under =
+    incident.status === "active" && (status === "PARTIALLY_RESOURCED" || status === "UNRESOURCED");
 
   const assigned = allocation?.assigned || incident.assigned || {};
   const suggested = allocation?.allocated || {}; // solver's extra units for this incident

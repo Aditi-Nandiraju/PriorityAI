@@ -22,6 +22,7 @@ from .db import users
 
 _pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 _bearer = HTTPBearer(auto_error=True)
+_bearer_optional = HTTPBearer(auto_error=False)
 
 
 def hash_password(plain: str) -> str:
@@ -76,3 +77,18 @@ def require_admin(user: dict[str, Any] = Depends(get_current_user)) -> dict[str,
     if user.get("role") != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "admin role required")
     return user
+
+
+def get_optional_user(
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer_optional),
+) -> dict[str, Any] | None:
+    """Like get_current_user, but never raises: returns None with no/bad token.
+    For endpoints that stay open (e.g. /ingest/*) but should still attribute the
+    action to a real operator when the caller happens to be logged in."""
+    if not creds:
+        return None
+    try:
+        claims = _decode(creds.credentials)
+    except HTTPException:
+        return None
+    return users().find_one({"username": claims.get("sub")})

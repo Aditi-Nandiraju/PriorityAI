@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { api } from "../api.js";
+import { useMemo, useState } from "react";
 import { useAuth } from "../context/AuthContext.jsx";
+import { useBoardData } from "../context/BoardDataContext.jsx";
 import IncidentCard from "../components/IncidentCard.jsx";
 import ResourceStrip from "../components/ResourceStrip.jsx";
 
@@ -8,62 +8,31 @@ const UNDER_RESOURCED = new Set(["PARTIALLY_RESOURCED", "UNRESOURCED"]);
 
 export default function Board() {
   const { isAuthenticated } = useAuth();
-  const [incidents, setIncidents] = useState(null);
-  const [error, setError] = useState("");
-  const [statusFilter, setStatusFilter] = useState("active");
-  const [plan, setPlan] = useState(null);
-  const [planStale, setPlanStale] = useState(false); // true = preview, false = committed run
-  const [method, setMethod] = useState("optimal");
-  const [busy, setBusy] = useState(false);
-  const [onlyUnder, setOnlyUnder] = useState(false);
+  const {
+    incidents,
+    resources,
+    error,
+    statusFilter,
+    setStatusFilter,
+    plan,
+    planStale,
+    method,
+    setMethod,
+    busy,
+    refresh,
+    runAndLog,
+    quickAssign,
+    demoMode,
+    setDemoMode,
+    replayStatus,
+    startReplay,
+    stopReplay,
+  } = useBoardData();
 
-  const loadIncidents = useCallback(async () => {
-    const q = statusFilter === "all" ? "" : `?status=${statusFilter}`;
-    setIncidents(await api.get(`/incidents${q}`, { auth: false }));
-  }, [statusFilter]);
-
-  const loadPreview = useCallback(async () => {
-    setPlan(await api.get(`/simulate/preview?method=${method}`, { auth: false }));
-    setPlanStale(true);
-  }, [method]);
-
-  const refresh = useCallback(async () => {
-    setError("");
-    try {
-      await Promise.all([loadIncidents(), loadPreview()]);
-    } catch (err) {
-      setError(err.message);
-    }
-  }, [loadIncidents, loadPreview]);
-
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
-
-  async function withBusy(fn) {
-    setBusy(true);
-    setError("");
-    try {
-      await fn();
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const runAndLog = () =>
-    withBusy(async () => {
-      setPlan(await api.post(`/simulate?method=${method}`));
-      setPlanStale(false);
-    });
-
-  // assigns to ONE incident only (the card the operator clicked)
-  const quickAssign = (id, assigned) =>
-    withBusy(async () => {
-      await api.put(`/incidents/${id}/assignment`, { assigned });
-      await refresh();
-    });
+  const [compression, setCompression] = useState(60);
+  const [onlyUnder, setOnlyUnder] = useState(false); // filters the incident CARDS below
+  const [simCollapsed, setSimCollapsed] = useState(false); // collapses the sim panel's details
+  const [simOnlyUnder, setSimOnlyUnder] = useState(false); // filters the sim panel's TABLE rows
 
   const statusById = useMemo(() => {
     const m = {};
@@ -71,21 +40,49 @@ export default function Board() {
     return m;
   }, [plan]);
 
+  // Re-apply the status filter client-side too (not just via the server query
+  // that fetched `incidents`): local state can now change without a refetch -
+  // e.g. demo mode resolving an incident - so an "Active" view must stop
+  // showing something the moment its local status flips to resolved.
   const visible = useMemo(() => {
     if (!incidents) return null;
-    if (!onlyUnder) return incidents;
-    return incidents.filter((inc) => UNDER_RESOURCED.has(statusById[inc.id]?.status));
-  }, [incidents, onlyUnder, statusById]);
+    let list = incidents;
+    if (statusFilter !== "all") {
+      list = list.filter((inc) => inc.status === statusFilter);
+    }
+    if (onlyUnder) {
+      list = list.filter((inc) => UNDER_RESOURCED.has(statusById[inc.id]?.status));
+    }
+    return list;
+  }, [incidents, statusFilter, onlyUnder, statusById]);
 
   const underCount = incidents
-    ? incidents.filter((inc) => UNDER_RESOURCED.has(statusById[inc.id]?.status)).length
+    ? incidents.filter(
+        (inc) => inc.status === "active" && UNDER_RESOURCED.has(statusById[inc.id]?.status)
+      ).length
     : 0;
+
+  const simRows = useMemo(() => {
+    if (!plan) return [];
+    return simOnlyUnder ? plan.allocations.filter((a) => UNDER_RESOURCED.has(a.status)) : plan.allocations;
+  }, [plan, simOnlyUnder]);
 
   return (
     <div>
       <div className="page-head">
         <h2>Incident Board</h2>
         <div className="controls">
+          <label
+            className="inline demo-toggle"
+            title="Client-side placeholder: periodically resolves a fully-resourced incident and releases its resources, for presentation purposes only."
+          >
+            <input
+              type="checkbox"
+              checked={demoMode}
+              onChange={(e) => setDemoMode(e.target.checked)}
+            />
+            Demo mode
+          </label>
           <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
             <option value="active">Active</option>
             <option value="all">All</option>
@@ -97,11 +94,65 @@ export default function Board() {
         </div>
       </div>
 
-      <ResourceStrip remaining={plan?.remaining_inventory} />
+      {isAuthenticated && (
+        <div className="card live-feed-panel">
+          <div className="sim-head">
+            <div className="sim-title">
+              <strong>Live feed replay</strong>
+              <span className="muted small">
+                drips data/replay/*.csv into Reports, realistically paced, loops forever
+              </span>
+            </div>
+            <div className="controls">
+              {replayStatus?.running ? (
+                <>
+                  <span className="muted small">
+                    cycle {replayStatus.cycle} · {replayStatus.reports_ingested_this_cycle}/
+                    {replayStatus.total_reports_per_cycle} this cycle · compression{" "}
+                    {replayStatus.compression_factor}×
+                  </span>
+                  <button className="btn ghost" onClick={stopReplay} disabled={busy}>
+                    Stop
+                  </button>
+                </>
+              ) : (
+                <>
+                  <label className="inline">
+                    compression
+                    <input
+                      type="number"
+                      min="1"
+                      className="qty"
+                      value={compression}
+                      onChange={(e) => setCompression(Number(e.target.value))}
+                    />
+                  </label>
+                  <button className="btn primary" onClick={() => startReplay(compression)} disabled={busy}>
+                    Start live feed
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+          {replayStatus?.error && <div className="alert error">replay stopped: {replayStatus.error}</div>}
+        </div>
+      )}
+
+      <ResourceStrip resources={resources} />
 
       <div className="card sim-panel">
         <div className="sim-head">
-          <strong>Allocation simulation</strong>
+          <div className="sim-title">
+            <button
+              className="btn ghost xs sim-collapse-btn"
+              onClick={() => setSimCollapsed((v) => !v)}
+              aria-expanded={!simCollapsed}
+              title={simCollapsed ? "Expand" : "Collapse"}
+            >
+              {simCollapsed ? "▸" : "▾"}
+            </button>
+            <strong>Allocation simulation</strong>
+          </div>
           <div className="controls">
             <label className="inline">
               Method
@@ -116,7 +167,7 @@ export default function Board() {
           </div>
         </div>
 
-        {plan && (
+        {!simCollapsed && plan && (
           <div className="sim-result">
             <div className="sim-summary">
               <Stat label="fully" value={plan.summary.fully_resourced} tone="ok" />
@@ -131,6 +182,14 @@ export default function Board() {
               <span className="muted small">
                 {planStale ? "live preview (not logged)" : "committed run"}
               </span>
+              <label className="checkbox small sim-only-under">
+                <input
+                  type="checkbox"
+                  checked={simOnlyUnder}
+                  onChange={(e) => setSimOnlyUnder(e.target.checked)}
+                />
+                only under-resourced
+              </label>
             </div>
             <table className="sim-table">
               <thead>
@@ -143,19 +202,27 @@ export default function Board() {
                 </tr>
               </thead>
               <tbody>
-                {plan.allocations.map((a) => (
-                  <tr key={a.incident_id} className={`alloc-${a.status}`}>
-                    <td>{a.priority_score}</td>
-                    <td>{a.incident_type.replace(/_/g, " ")}</td>
-                    <td>{a.severity_class}</td>
-                    <td>{a.status.replace(/_/g, " ").toLowerCase()}</td>
-                    <td className="muted">
-                      {Object.entries(a.shortages || {})
-                        .map(([k, v]) => `${k}:${v}`)
-                        .join(", ") || "—"}
+                {simRows.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="muted">
+                      No under-resourced incidents in this plan.
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  simRows.map((a) => (
+                    <tr key={a.incident_id} className={`alloc-${a.status}`}>
+                      <td>{a.priority_score}</td>
+                      <td>{a.incident_type.replace(/_/g, " ")}</td>
+                      <td>{a.severity_class}</td>
+                      <td>{a.status.replace(/_/g, " ").toLowerCase()}</td>
+                      <td className="muted">
+                        {Object.entries(a.shortages || {})
+                          .map(([k, v]) => `${k}:${v}`)
+                          .join(", ") || "—"}
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
