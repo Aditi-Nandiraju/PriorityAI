@@ -11,4 +11,5 @@ export const NAV = [
   { to: "/board", label: "Incident Board", roles: ["operator", "admin"] },
   { to: "/resources", label: "Resource Inventory", roles: ["operator", "admin"] },
   { to: "/activity", label: "Activity Log", roles: ["admin"] },
+  { to: "/settings", label: "Settings", roles: ["admin"] },
 ];

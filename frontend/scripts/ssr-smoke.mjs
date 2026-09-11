@@ -13,6 +13,7 @@ import Board from "../src/pages/Board.jsx";
 import IncidentDetail from "../src/pages/IncidentDetail.jsx";
 import Resources from "../src/pages/Resources.jsx";
 import ActivityLog from "../src/pages/ActivityLog.jsx";
+import Settings from "../src/pages/Settings.jsx";
 import Layout from "../src/components/Layout.jsx";
 import { NAV } from "../src/nav.js";
 
@@ -51,6 +52,10 @@ ok &= tryRender(
 ok &= tryRender("IncidentDetail", React.createElement(IncidentDetail), "/incident/abc");
 ok &= tryRender("Resources", React.createElement(Resources));
 ok &= tryRender("ActivityLog", React.createElement(ActivityLog));
+ok &= tryRender(
+  "Settings",
+  React.createElement(BoardDataProvider, null, React.createElement(Settings))
+);
 
 console.log("\nRole-based tab visibility (nav.js):");
 for (const role of ["admin", "operator"]) {
@@ -58,7 +63,9 @@ for (const role of ["admin", "operator"]) {
   console.log(`  ${role.padEnd(9)} -> ${visible.join(", ")}`);
 }
 const operatorSeesActivity = NAV.find((t) => t.to === "/activity").roles.includes("operator");
+const operatorSeesSettings = NAV.find((t) => t.to === "/settings").roles.includes("operator");
 console.log(`  operator sees Activity Log? ${operatorSeesActivity} (expected false)`);
-ok &= !operatorSeesActivity;
+console.log(`  operator sees Settings?     ${operatorSeesSettings} (expected false)`);
+ok &= !operatorSeesActivity && !operatorSeesSettings;
 
 process.exit(ok ? 0 : 1);

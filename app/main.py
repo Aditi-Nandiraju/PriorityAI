@@ -550,7 +550,12 @@ def set_assignment(
     write_audit(
         user["username"],
         "incidents:assign",
-        {"incident_id": incident_id, "assigned": body.assigned, "previous": current},
+        {
+            "incident_id": incident_id,
+            "incident_type": doc["incident_type"],  # so /notifications can show a readable message
+            "assigned": body.assigned,
+            "previous": current,
+        },
     )
     return _incident_out(incidents().find_one({"_id": incident_id}))
 
@@ -633,7 +638,11 @@ def update_resource(resource_id: str, body: ResourceUpdate, user: dict = Depends
     write_audit(
         user["username"],
         "resources:update",
-        {"resource_id": resource_id, "changes": changes},
+        {
+            "resource_id": resource_id,
+            "resource_type": updated["resource_type"],  # so /notifications can show a readable message
+            "changes": changes,
+        },
     )
     return _clean(updated)
 
@@ -758,6 +767,31 @@ async def reset_everything(user: dict = Depends(require_admin)):
     seeded = seed_resources_if_empty()
     write_audit(user["username"], "reset", {"resource_pools_reseeded": seeded})
     return {"reset": True, "resource_pools_reseeded": seeded}
+
+
+# --------------------------------------------------------------------------- #
+# notifications (JWT) - lightweight cross-operator "someone just changed this"
+# feed, for when two people share one Atlas database from separate localhosts
+# --------------------------------------------------------------------------- #
+NOTIFY_ACTIONS = {"resources:create", "resources:update", "incidents:assign"}
+
+
+@app.get("/notifications")
+def list_notifications(
+    limit: int = Query(20, ge=1, le=100),
+    _: dict = Depends(get_current_user),  # any authenticated user, not admin-only like /audit
+):
+    """Recent resource-quantity / assignment changes, scoped to just the two
+    action families an operator cares about (the full trail is /audit,
+    admin-only). Frontend polls this and toasts anything new that wasn't done
+    by the current user - see BoardDataContext.jsx.
+
+    Filters in Python rather than a Mongo $in query, so behaviour is identical
+    whether the backend is on Atlas or the in-memory fallback (which only
+    supports plain equality matches - see db.py: _MemCollection._match)."""
+    recent = audit_log().find().sort("timestamp", -1).limit(max(limit * 4, 100))
+    matched = [d for d in recent if d.get("action") in NOTIFY_ACTIONS][:limit]
+    return [_clean(d) for d in matched]
 
 
 # --------------------------------------------------------------------------- #

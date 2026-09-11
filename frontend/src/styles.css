@@ -228,6 +228,8 @@ legend { padding: 0 0.4rem; font-weight: 600; font-size: 0.85em; color: var(--mu
 .incident-card:hover { border-color: var(--accent); }
 .incident-card.under { border-left: 4px solid var(--warn); }
 .incident-card.under-UNRESOURCED { border-left-color: var(--bad); }
+.incident-card.resolved { opacity: 0.55; filter: grayscale(55%); }
+.incident-card.resolved:hover { opacity: 0.85; border-color: var(--line); }
 .ic-alloc {
   margin: 0.4rem 0 0.1rem;
   font-size: 0.82em;
@@ -327,9 +329,15 @@ td.short { color: var(--bad); font-weight: 600; }
   letter-spacing: 0.06em;
   vertical-align: middle;
 }
-.live-feed-panel .sim-title { flex-direction: column; align-items: flex-start; gap: 0.15rem; }
-.live-feed-panel .controls { flex-wrap: wrap; }
-.live-feed-panel input.qty { width: 70px; }
+/* read-only status readout on the Board - controls themselves live on Settings */
+.live-feed-status {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+  font-size: 0.9em;
+}
+.run-log-note { margin: 0.4rem 0 0; }
 
 /* ---- toasts ---- */
 .toaster {
@@ -355,6 +363,7 @@ td.short { color: var(--bad); font-weight: 600; }
 }
 .toast-info { border-left: 4px solid var(--accent); }
 .toast-demo { border-left: 4px solid #7c3aed; background: #f5f3ff; }
+.toast-peer { border-left: 4px solid #0e7490; background: #ecfeff; }
 .toast-badge {
   flex-shrink: 0;
   padding: 1px 6px;
@@ -365,6 +374,7 @@ td.short { color: var(--bad); font-weight: 600; }
   font-weight: 700;
   letter-spacing: 0.04em;
 }
+.toast-badge-peer { background: #0e7490; }
 .toast-text { flex: 1; }
 .toast-close {
   border: none;

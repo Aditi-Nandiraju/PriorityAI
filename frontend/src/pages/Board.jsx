@@ -22,14 +22,10 @@ export default function Board() {
     refresh,
     runAndLog,
     quickAssign,
-    demoMode,
-    setDemoMode,
+    reopenIncident,
     replayStatus,
-    startReplay,
-    stopReplay,
   } = useBoardData();
 
-  const [compression, setCompression] = useState(60);
   const [onlyUnder, setOnlyUnder] = useState(false); // filters the incident CARDS below
   const [simCollapsed, setSimCollapsed] = useState(false); // collapses the sim panel's details
   const [simOnlyUnder, setSimOnlyUnder] = useState(false); // filters the sim panel's TABLE rows
@@ -53,7 +49,10 @@ export default function Board() {
     if (onlyUnder) {
       list = list.filter((inc) => UNDER_RESOURCED.has(statusById[inc.id]?.status));
     }
-    return list;
+    // Resolved incidents sink to the end (greyed out via IncidentCard) instead
+    // of competing with active ones on priority - stable sort, so it's purely
+    // a resolved/not-resolved partition and doesn't reshuffle anything else.
+    return [...list].sort((a, b) => (a.status === "resolved") - (b.status === "resolved"));
   }, [incidents, statusFilter, onlyUnder, statusById]);
 
   const underCount = incidents
@@ -72,17 +71,6 @@ export default function Board() {
       <div className="page-head">
         <h2>Incident Board</h2>
         <div className="controls">
-          <label
-            className="inline demo-toggle"
-            title="Client-side placeholder: periodically resolves a fully-resourced incident and releases its resources, for presentation purposes only."
-          >
-            <input
-              type="checkbox"
-              checked={demoMode}
-              onChange={(e) => setDemoMode(e.target.checked)}
-            />
-            Demo mode
-          </label>
           <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
             <option value="active">Active</option>
             <option value="all">All</option>
@@ -94,49 +82,21 @@ export default function Board() {
         </div>
       </div>
 
-      {isAuthenticated && (
-        <div className="card live-feed-panel">
-          <div className="sim-head">
-            <div className="sim-title">
-              <strong>Live feed replay</strong>
-              <span className="muted small">
-                drips data/replay/*.csv into Reports, realistically paced, loops forever
-              </span>
-            </div>
-            <div className="controls">
-              {replayStatus?.running ? (
-                <>
-                  <span className="muted small">
-                    cycle {replayStatus.cycle} · {replayStatus.reports_ingested_this_cycle}/
-                    {replayStatus.total_reports_per_cycle} this cycle · compression{" "}
-                    {replayStatus.compression_factor}×
-                  </span>
-                  <button className="btn ghost" onClick={stopReplay} disabled={busy}>
-                    Stop
-                  </button>
-                </>
-              ) : (
-                <>
-                  <label className="inline">
-                    compression
-                    <input
-                      type="number"
-                      min="1"
-                      className="qty"
-                      value={compression}
-                      onChange={(e) => setCompression(Number(e.target.value))}
-                    />
-                  </label>
-                  <button className="btn primary" onClick={() => startReplay(compression)} disabled={busy}>
-                    Start live feed
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-          {replayStatus?.error && <div className="alert error">replay stopped: {replayStatus.error}</div>}
-        </div>
-      )}
+      {/* Read-only - start/stop/compression/demo-mode controls live on
+          Settings now. This just answers "is it running right now" without
+          navigating away, per the design note in Settings.jsx. */}
+      <div className="live-feed-status">
+        <span className={`chip ${replayStatus?.running ? "status-active" : ""}`}>
+          live feed: {replayStatus?.running ? "running" : "idle"}
+        </span>
+        {replayStatus?.running && (
+          <span className="muted small">
+            cycle {replayStatus.cycle} · {replayStatus.reports_ingested_this_cycle}/
+            {replayStatus.total_reports_per_cycle} reports this cycle
+          </span>
+        )}
+        {replayStatus?.error && <span className="muted small">(stopped on error - see Settings)</span>}
+      </div>
 
       <ResourceStrip resources={resources} />
 
@@ -166,6 +126,11 @@ export default function Board() {
             </button>
           </div>
         </div>
+        <p className="muted small run-log-note">
+          Records this recommendation to the audit log for reference — does <strong>not</strong>{" "}
+          deploy resources. To actually commit resources to an incident, use "Assign suggested" on
+          its card or the incident detail page.
+        </p>
 
         {!simCollapsed && plan && (
           <div className="sim-result">
@@ -180,7 +145,9 @@ export default function Board() {
                 </span>
               )}
               <span className="muted small">
-                {planStale ? "live preview (not logged)" : "committed run"}
+                {planStale
+                  ? "live preview — nothing recorded, nothing deployed"
+                  : "recorded to audit log — resources not deployed"}
               </span>
               <label className="checkbox small sim-only-under">
                 <input
@@ -261,6 +228,7 @@ export default function Board() {
               canAssign={isAuthenticated}
               busy={busy}
               onQuickAssign={quickAssign}
+              onReopen={reopenIncident}
             />
           ))}
         </div>

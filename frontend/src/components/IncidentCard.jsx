@@ -6,14 +6,17 @@ import { Link } from "react-router-dom";
 // the operator doesn't have to open every incident. Resolving is NOT a manual
 // board action - see hooks/useDemoMode.js: an incident resolves once it's
 // fully resourced and nothing more is outstanding, same as it would in reality.
-export default function IncidentCard({ incident, allocation, canAssign, busy, onQuickAssign }) {
+// Once resolved, the board greys the card out and sorts it to the end (see
+// Board.jsx) - but reopening it here IS a manual, one-click action, since
+// that's just undoing a mistake, not faking a resolution.
+export default function IncidentCard({ incident, allocation, canAssign, busy, onQuickAssign, onReopen }) {
   const sev = incident.severity_class || "LOW";
   const status = allocation?.status;
+  const resolved = incident.status === "resolved";
   // guard on incident.status too: once an incident is resolved (including by
   // demo mode) its old allocation row can be stale - never highlight it as
   // under-resourced or offer assign actions once it's no longer active.
-  const under =
-    incident.status === "active" && (status === "PARTIALLY_RESOURCED" || status === "UNRESOURCED");
+  const under = incident.status === "active" && (status === "PARTIALLY_RESOURCED" || status === "UNRESOURCED");
 
   const assigned = allocation?.assigned || incident.assigned || {};
   const suggested = allocation?.allocated || {}; // solver's extra units for this incident
@@ -39,10 +42,16 @@ export default function IncidentCard({ incident, allocation, canAssign, busy, on
     onQuickAssign(incident.id, {});
   }
 
+  function reopen(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    onReopen(incident.id);
+  }
+
   return (
     <Link
       to={`/incident/${incident.id}`}
-      className={`incident-card${under ? ` under under-${status}` : ""}`}
+      className={`incident-card${under ? ` under under-${status}` : ""}${resolved ? " resolved" : ""}`}
     >
       <div className="ic-top">
         <span className={`sev-badge sev-${sev}`}>{sev}</span>
@@ -92,6 +101,14 @@ export default function IncidentCard({ incident, allocation, canAssign, busy, on
               Clear
             </button>
           )}
+        </div>
+      )}
+
+      {canAssign && resolved && (
+        <div className="ic-actions">
+          <button className="btn ghost xs" onClick={reopen} disabled={busy}>
+            ↺ Reopen
+          </button>
         </div>
       )}
 
