@@ -33,7 +33,7 @@ from severity_rules import (
     severity_breakdown,
 )
 
-from .allocation import allocate, compute_priority, default_confidence
+from .allocation import allocate, compute_priority, default_confidence, resolve_priority_ties
 from .auth import (
     authenticate,
     create_access_token,
@@ -55,6 +55,7 @@ from .db import (
     utcnow,
     write_audit,
 )
+from . import fusion
 from .models import (
     AssignmentRequest,
     IncidentManualRequest,
@@ -184,6 +185,7 @@ def _active_incident_payload() -> list[dict[str, Any]]:
             {
                 "id": d["_id"],
                 "incident_type": d["incident_type"],
+                "location": d.get("location"),  # for the distance tiebreak; may be "Unknown"/None
                 "severity_class": d.get("severity_class", "LOW"),
                 "priority_score": float(d.get("priority_score", 0.0)),
                 "required_remaining": remaining,
@@ -200,18 +202,48 @@ def _inventory_map() -> dict[str, int]:
     return inv
 
 
+def _pools_by_type() -> dict[str, list[str]]:
+    """resource_type -> list of home_zones of the pools supplying it (pools with
+    no home_zone set are skipped, not defaulted to anything)."""
+    out: dict[str, list[str]] = {}
+    for pool in resources().find():
+        zone = pool.get("home_zone")
+        if zone:
+            out.setdefault(pool["resource_type"], []).append(zone)
+    return out
+
+
+def _ordered_incident_payload() -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """_active_incident_payload(), pre-ordered so priority ties are broken by
+    zone distance where possible (resolve_priority_ties) - see app/allocation.py.
+    Every allocate() call site should build its incident list through this, not
+    _active_incident_payload() directly, so the tiebreak applies everywhere
+    consistently."""
+    return resolve_priority_ties(_active_incident_payload(), _pools_by_type())
+
+
 def _insert_report(payload: dict, source_type: str, created_by: str) -> str:
     rid = uuid.uuid4().hex
+    created_at = utcnow()
     reports().insert_one(
         {
             "_id": rid,
             "source_type": source_type,
             "created_by": created_by,
-            "created_at": utcnow(),
+            "created_at": created_at,
             "status": "new",
             **payload,
         }
     )
+    # Best-effort report-to-report fusion (see app/fusion.py) - tags this report
+    # with a cluster_id if it's probably the same event as a recent one. Never
+    # allowed to fail ingestion: fuse_report() itself swallows model-load errors
+    # and returns None, but this call site guards it too in case a transient
+    # DB hiccup happens during the extra find/update calls fusion makes.
+    try:
+        fusion.fuse_report(rid, payload.get("text", ""), created_at)
+    except Exception as exc:  # noqa: BLE001 - fusion is a nice-to-have, never worth a failed ingest
+        print(f"[fusion] skipped for report {rid}: {exc.__class__.__name__}: {exc}")
     return rid
 
 
@@ -349,6 +381,17 @@ def list_reports(
     return [_clean(d) for d in docs]
 
 
+@app.get("/reports/clusters")
+def report_clusters(user: dict = Depends(get_current_user)):
+    """Groups of reports fusion.py judged likely to be the same event (see
+    app/fusion.py) - a read-only aid for an operator deciding whether to raise
+    one incident from several reports. Never includes single-report clusters
+    (nothing to fuse there). `fusion_available: False` means the embedding
+    model couldn't be loaded (e.g. no internet on first run) - new reports
+    still ingest fine, they just won't get clustered until it is."""
+    return {"fusion_available": fusion.FUSION_AVAILABLE, "clusters": fusion.list_clusters()}
+
+
 # --------------------------------------------------------------------------- #
 # incidents
 # --------------------------------------------------------------------------- #
@@ -434,7 +477,8 @@ def incident_allocation(
             "note": f"incident status is {doc.get('status')!r}; only active incidents are simulated",
         }
 
-    plan = allocate(method, _active_incident_payload(), _available_inventory())
+    payload, tiebreaks = _ordered_incident_payload()
+    plan = allocate(method, payload, _available_inventory())
     row = next((a for a in plan["allocations"] if a["incident_id"] == incident_id), None)
     return {
         "incident_id": incident_id,
@@ -442,6 +486,7 @@ def incident_allocation(
         "required_resources": required,
         "allocation": row,
         "plan_summary": plan["summary"],
+        "tiebreak_applied": tiebreaks.get(incident_id),  # "distance" | "fallback_no_location_data" | None
     }
 
 
@@ -463,7 +508,8 @@ def incident_contention(
     total = _inventory_map()
     committed = _committed_map()
 
-    plan = allocate(method, _active_incident_payload(), _available_inventory())
+    payload, tiebreaks = _ordered_incident_payload()
+    plan = allocate(method, payload, _available_inventory())
     sim_by_id = {a["incident_id"]: a for a in plan["allocations"]}
     own_row = sim_by_id.get(incident_id) or {}
     suggested = own_row.get("allocated", {})
@@ -508,6 +554,7 @@ def incident_contention(
         "assigned": assigned,
         "suggested": suggested,
         "sim_status": own_row.get("status"),
+        "tiebreak_applied": tiebreaks.get(incident_id),
         "plan_summary": plan["summary"],
         "availability": availability,
         "competitors": competitors,
@@ -611,6 +658,7 @@ def create_resource(body: ResourceCreate, user: dict = Depends(require_admin)):
         "resource_type": body.resource_type,
         "label": body.label or body.resource_type.replace("_", " ").title(),
         "quantity": body.quantity,
+        "home_zone": body.home_zone,
         "created_by": user["username"],
         "created_at": utcnow(),
     }
@@ -655,7 +703,10 @@ def simulate_preview(method: str = Query("optimal", pattern="^(optimal|greedy)$"
     """Read-only allocation plan for display purposes (the board highlights
     under-resourced incidents from this). No auth, no audit, no persistence -
     POST /simulate is the version an operator commits and that gets logged."""
-    return allocate(method, _active_incident_payload(), _available_inventory())
+    payload, tiebreaks = _ordered_incident_payload()
+    plan = allocate(method, payload, _available_inventory())
+    plan["tiebreaks"] = tiebreaks  # incident_id -> "distance" | "fallback_no_location_data"
+    return plan
 
 
 @app.post("/simulate/commit")
@@ -667,7 +718,8 @@ def simulate_commit(
     Each incident's assignment becomes (what it already had) + (what the solver
     allocates it now). Safe against inventory because the solver runs against
     what's still available. One audit row summarising the batch."""
-    plan = allocate(method, _active_incident_payload(), _available_inventory())
+    payload, tiebreaks = _ordered_incident_payload()
+    plan = allocate(method, payload, _available_inventory())
 
     committed_ids = []
     for row in plan["allocations"]:
@@ -696,6 +748,7 @@ def simulate_commit(
         "incidents_assigned": len(committed_ids),
         "assigned_ids": committed_ids,
         "plan_summary": plan["summary"],
+        "tiebreaks": tiebreaks,
     }
 
 
@@ -706,7 +759,9 @@ def simulate(
 ):
     # Same active-queue snapshot the read-only previews (/simulate/preview and
     # /incidents/{id}/allocation) use, so nothing disagrees with the committed plan.
-    plan = allocate(method, _active_incident_payload(), _available_inventory())
+    payload, tiebreaks = _ordered_incident_payload()
+    plan = allocate(method, payload, _available_inventory())
+    plan["tiebreaks"] = tiebreaks
 
     sid = uuid.uuid4().hex
     simulations().insert_one(

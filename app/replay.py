@@ -7,8 +7,9 @@ forever with a small per-cycle jitter so repeats are never bit-identical.
 
 This simulates an incident unfolding live, for demo purposes. It only ever
 writes to `reports` -- the same collection /reports/* and /ingest/* write to
--- it never creates incidents itself (this app has no automatic
-report -> incident fusion yet).
+-- it never creates incidents itself; each inserted report is also run
+through fusion.fuse_report() (see app/fusion.py) to tag it with a cluster_id
+alongside reports from the other ingestion paths.
 
 Pacing:  gap = clamp((next_ts - prev_ts) / compression_factor, 0.5s, 6.0s)
 so ~2 hours of real escalation compresses into ~2 minutes (compression=60)
@@ -35,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from .db import reports, utcnow, write_audit
+from . import fusion
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "replay"
 SOURCE_FILES = {
@@ -86,14 +88,16 @@ def _gap_seconds(prev_ts: dt.datetime, next_ts: dt.datetime, compression: float)
 
 
 def _insert_report(row: dict[str, Any], cycle: int) -> str:
-    """Blocking (pymongo) -- called via asyncio.to_thread so it never stalls
-    the event loop other requests are running on."""
+    """Blocking (pymongo + fusion's CPU-bound embedding) -- called via
+    asyncio.to_thread so it never stalls the event loop other requests are
+    running on."""
     rid = uuid.uuid4().hex
+    created_at = utcnow()
     doc = {
         "_id": rid,
         "source_type": row["source_type"],
         "created_by": "live-feed-replay",
-        "created_at": utcnow(),
+        "created_at": created_at,
         "status": "new",
         "text": row["text"],
         "replay_report_id": row["report_id"],
@@ -102,6 +106,10 @@ def _insert_report(row: dict[str, Any], cycle: int) -> str:
     if row["location"]:
         doc["location"] = row["location"]
     reports().insert_one(doc)
+    try:
+        fusion.fuse_report(rid, row["text"], created_at)
+    except Exception as exc:  # noqa: BLE001 - fusion is a nice-to-have, never worth breaking the replay loop
+        print(f"[fusion] skipped for replay report {rid}: {exc.__class__.__name__}: {exc}")
     return rid
 
 

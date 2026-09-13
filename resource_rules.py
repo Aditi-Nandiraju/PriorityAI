@@ -45,3 +45,55 @@ INCIDENT_TYPES: tuple[str, ...] = tuple(RESOURCE_REQUIREMENTS)
 RESOURCE_TYPES: tuple[str, ...] = tuple(
     sorted({r for req in RESOURCE_REQUIREMENTS.values() for r in req})
 )
+
+# --------------------------------------------------------------------------- #
+# Zones - rough categorical distance, NOT real GPS/routing. Hand-authored for
+# the locations that actually appear in our demo data (data/replay/*.csv +
+# incident locations), same spirit as everything else here: a plain lookup
+# table an operator can read and edit, not a computed/geocoded value.
+# --------------------------------------------------------------------------- #
+ZONES: tuple[str, ...] = ("Central Market", "Ramanthapur", "Gowliguda", "NH44", "Industrial Area")
+
+# 0 = same zone, 1 = adjacent, 2 = far. Symmetric - each unordered pair stored
+# once; get_zone_distance() checks both orders. Every zone is implicitly
+# distance 0 from itself (handled in get_zone_distance, not listed below).
+ZONE_DISTANCE: dict[tuple[str, str], int] = {
+    ("Central Market", "Gowliguda"): 1,        # both central, close together
+    ("Central Market", "Ramanthapur"): 2,
+    ("Central Market", "NH44"): 2,
+    ("Central Market", "Industrial Area"): 2,
+    ("Ramanthapur", "Gowliguda"): 2,
+    ("Ramanthapur", "NH44"): 1,                 # NH44 runs past Ramanthapur
+    ("Ramanthapur", "Industrial Area"): 2,
+    ("Gowliguda", "NH44"): 2,
+    ("Gowliguda", "Industrial Area"): 1,
+    ("NH44", "Industrial Area"): 1,             # industrial areas sit along the highway
+}
+
+# One hand-picked home zone per resource type, used to seed the default
+# inventory pools so the distance tiebreak has real data to work with out of
+# the box (see app/seed.py). Purely illustrative - an admin can reassign any
+# pool's zone from the Resources page.
+DEFAULT_RESOURCE_ZONES: dict[str, str] = {
+    "ambulance": "Central Market",
+    "fire_engine": "Gowliguda",
+    "rescue_boat": "Ramanthapur",
+    "rescue_team": "Central Market",
+    "ground_team": "NH44",
+    "medical_team": "Central Market",
+    "hazmat_team": "Industrial Area",
+}
+
+
+def get_zone_distance(zone_a: str | None, zone_b: str | None) -> int | None:
+    """
+    Rough categorical distance (0/1/2) between two zones, or None if either is
+    missing or not a recognised zone. None must never be treated as 0 or as
+    "far" by a caller - guessing a fake distance is worse than admitting there
+    isn't one; see app/allocation.py: resolve_priority_ties.
+    """
+    if not zone_a or not zone_b or zone_a not in ZONES or zone_b not in ZONES:
+        return None
+    if zone_a == zone_b:
+        return 0
+    return ZONE_DISTANCE.get((zone_a, zone_b), ZONE_DISTANCE.get((zone_b, zone_a)))

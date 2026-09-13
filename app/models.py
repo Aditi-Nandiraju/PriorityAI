@@ -15,7 +15,7 @@ from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from resource_rules import INCIDENT_TYPES, RESOURCE_TYPES
+from resource_rules import INCIDENT_TYPES, RESOURCE_TYPES, ZONES
 from severity_rules import SEVERITY_WEIGHTS
 
 SourceType = Literal["social_media", "ground_team", "citizen_reports"]
@@ -131,6 +131,7 @@ class ResourceCreate(BaseModel):
     resource_type: str
     label: str | None = None
     quantity: int = Field(ge=0)
+    home_zone: str | None = None  # e.g. "NH44" - used only for the distance tiebreak
 
     @field_validator("resource_type")
     @classmethod
@@ -139,11 +140,26 @@ class ResourceCreate(BaseModel):
             raise ValueError(f"unknown resource_type {v!r}; expected one of {list(RESOURCE_TYPES)}")
         return v
 
+    @field_validator("home_zone")
+    @classmethod
+    def _known_zone(cls, v: str | None) -> str | None:
+        if v is not None and v not in ZONES:
+            raise ValueError(f"unknown home_zone {v!r}; expected one of {list(ZONES)}")
+        return v
+
 
 class ResourceUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     label: str | None = None
     quantity: int | None = Field(default=None, ge=0)
+    home_zone: str | None = None
+
+    @field_validator("home_zone")
+    @classmethod
+    def _known_zone(cls, v: str | None) -> str | None:
+        if v is not None and v not in ZONES:
+            raise ValueError(f"unknown home_zone {v!r}; expected one of {list(ZONES)}")
+        return v
 
 
 # --------------------------------------------------------------------------- #

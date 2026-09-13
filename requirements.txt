@@ -17,3 +17,6 @@ passlib[bcrypt]
 bcrypt<4.1
 pyjwt
 pulp
+
+# --- report fusion (app/fusion.py) ---
+sentence-transformers

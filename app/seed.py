@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import uuid
 
-from resource_rules import DEFAULT_INVENTORY
+from resource_rules import DEFAULT_INVENTORY, DEFAULT_RESOURCE_ZONES
 
 from .auth import hash_password
 from .config import SEED_DEFAULT_RESOURCES
@@ -56,6 +56,7 @@ def seed_resources_if_empty() -> int:
             "resource_type": rtype,
             "label": rtype.replace("_", " ").title(),
             "quantity": qty,
+            "home_zone": DEFAULT_RESOURCE_ZONES.get(rtype),  # illustrative default; reassignable from Resources
             "created_at": utcnow(),
         }
         for rtype, qty in DEFAULT_INVENTORY.items()
